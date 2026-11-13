@@ -23,7 +23,6 @@ Playable client for jailbroken PS4 (GoldHEN / FW 9.00 validated):
 ### TODO
 
 - [ ] Keyboard and mouse support
-- [ ] mDNS host discovery
 - [ ] Native YCbCr/NV12 presentation on `sceVideoOut`
 
 Full port plan and longer backlog: [PLAN.md](PLAN.md). Validation notes: [docs/CONSOLE_VALIDATE.md](docs/CONSOLE_VALIDATE.md).
@@ -97,7 +96,7 @@ cmake --build build-ps4
   - GoldHEN → Enable plugins
   - After each reboot, send the kpayload once:
   `nc -w 3 <PS4_IP> 9090 < plugin/bin/ycbcr_kpatch_900.bin`
-3. On first launch the app opens the **SETTINGS** menu if no host is set. You can
+3. Start Sunshine on a PC on the same local network. Moonlight searches automatically when the menu opens. In HOSTS, select a PC with X, press TRIANGLE to search again, or press SQUARE to enter its IP manually. Use L1/R1 to switch tabs.
   also create `/data/moonlight/moonlight.ini` over FTP (see
    `pkg/assets/misc/moonlight.ini`). Optional: `debug_host.txt` with your PC IP.
 4. Start Sunshine on the PC. On first pair the app shows a PIN (also written to

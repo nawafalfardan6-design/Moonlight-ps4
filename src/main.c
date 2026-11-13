@@ -97,7 +97,7 @@ int main(void) {
     if (cfg.prefer_ycbcr)
         LOGN("YCbCr active");
 
-    /* No host: don't hang. The menu lets the user type it in Settings. */
+    /* The Hosts tab discovers PCs and also accepts a manual address. */
 
 #ifdef __ORBIS__
     if (cfg.prefer_ycbcr && !video_present_plugin_loaded()) {

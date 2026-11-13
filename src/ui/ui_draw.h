@@ -11,6 +11,9 @@ typedef struct {
 
 void ui_clear(ui_surface_t *s, uint32_t argb);
 void ui_rect(ui_surface_t *s, int x, int y, int w, int h, uint32_t argb);
-/* ASCII text 32..126 with scaled 8x8 font. */
+void ui_round_rect(ui_surface_t *s, int x, int y, int w, int h, int radius, uint32_t argb);
+/* Antialiased ASCII text at one of five preset sizes. */
+void ui_text_fit(ui_surface_t *s, int x, int y, int scale, uint32_t argb,
+                 int width, const char *str);
 void ui_text(ui_surface_t *s, int x, int y, int scale, uint32_t argb, const char *str);
 int ui_text_w(int scale, const char *str);

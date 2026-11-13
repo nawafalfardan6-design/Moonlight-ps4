@@ -1,5 +1,6 @@
 #include "ui_menu.h"
 #include "ui_draw.h"
+#include "host_discovery.h"
 #include "../log.h"
 #include "../input/input_pad.h"
 #include "../video/video.h"
@@ -18,17 +19,36 @@
 #define UI_W 1920
 #define UI_H 1080
 #define UI_MAX_APPS 64
+#define APP_COLS 4
+#define APP_VISIBLE 12
 
 /* Colors 0xAARRGGBB (BGRA LE). */
-#define COL_BG      0xFF0E1218u
-#define COL_PANEL   0xFF1A222Cu
-#define COL_SEL     0xFF24405Au
-#define COL_ACCENT  0xFF3FA7FFu
+#define COL_BG      0xFF10131Fu
+#define COL_BAR     0xFF151A29u
+#define COL_PANEL   0xFF1D2436u
+#define COL_SEL     0xFF2D3956u
+#define COL_ACCENT  0xFFA4B8FFu
 #define COL_TEXT    0xFFE8ECF0u
-#define COL_DIM     0xFF8794A2u
+#define COL_DIM     0xFFB2BED5u
 #define COL_WARN    0xFFFFB03Fu
 
 static int s_splash_hidden;
+
+static void card(ui_surface_t *s, int x, int y, int w, int h, int selected) {
+    if (selected) {
+        ui_round_rect(s, x, y, w, h, 18, COL_ACCENT);
+        ui_round_rect(s, x + 3, y + 3, w - 6, h - 6, 15, COL_SEL);
+    } else {
+        ui_round_rect(s, x, y, w, h, 18, COL_PANEL);
+    }
+}
+
+static void draw_background(ui_surface_t *s) {
+    for (int y = 0; y < s->h; y++) {
+        unsigned shade = (unsigned)(s->h - y) * 12 / (unsigned)s->h;
+        ui_rect(s, 0, y, s->w, 1, COL_BG + shade * 0x010102u);
+    }
+}
 
 static void ui_hide_splash_once(void) {
 #ifdef __ORBIS__
@@ -75,7 +95,9 @@ void ui_show_status(const char *title, const char *line1, const char *line2) {
 
 typedef enum {
     TAB_APPS = 0,
-    TAB_SETTINGS = 1,
+    TAB_HOSTS = 1,
+    TAB_SETTINGS = 2,
+    TAB_COUNT,
 } ui_tab_t;
 
 enum {
@@ -135,6 +157,8 @@ typedef struct {
     int sel_app;
     int app_first; /* scroll */
     int sel_set;
+    int sel_host;
+    host_discovery_t discovery;
 
     int osk_active;
     int osk_target; /* SET_HOST / SET_DEBUG_HOST */
@@ -299,6 +323,33 @@ static void osk_input(ui_state_t *st, unsigned pr) {
 
 /* --- tab input --- */
 
+static void hosts_input(ui_state_t *st, unsigned pr) {
+    int count = st->discovery.count;
+    if (pr & MENU_BTN_TRIANGLE) {
+        st->sel_host = 0;
+        discovery_start(&st->discovery);
+        return;
+    }
+    if (count && (pr & MENU_BTN_UP))
+        st->sel_host = (st->sel_host + count - 1) % count;
+    if (count && (pr & MENU_BTN_DOWN))
+        st->sel_host = (st->sel_host + 1) % count;
+    if (pr & MENU_BTN_SQUARE) {
+        osk_open(st, SET_HOST);
+        return;
+    }
+    if (count && (pr & MENU_BTN_CROSS)) {
+        const char *address = st->discovery.hosts[st->sel_host].address;
+        if (st->server && !strcmp(st->cfg->host, address)) {
+            st->tab = TAB_APPS;
+            return;
+        }
+        snprintf(st->cfg->host, sizeof(st->cfg->host), "%s", address);
+        save_cfg(st);
+        st->result = UI_MENU_RECONNECT;
+    }
+}
+
 static void launch_selected(ui_state_t *st) {
     if (st->napps > 0) {
         snprintf(st->cfg->app_name, sizeof(st->cfg->app_name), "%s",
@@ -311,12 +362,18 @@ static void launch_selected(ui_state_t *st) {
 }
 
 static void apps_input(ui_state_t *st, unsigned pr) {
-    if ((pr & MENU_BTN_UP) && st->napps > 0)
-        st->sel_app = (st->sel_app + st->napps - 1) % st->napps;
-    if ((pr & MENU_BTN_DOWN) && st->napps > 0)
-        st->sel_app = (st->sel_app + 1) % st->napps;
-    if (pr & (MENU_BTN_L1 | MENU_BTN_R1))
-        st->tab = TAB_SETTINGS;
+    if ((pr & MENU_BTN_LEFT) && st->sel_app > 0)
+        st->sel_app--;
+    if ((pr & MENU_BTN_RIGHT) && st->sel_app + 1 < st->napps)
+        st->sel_app++;
+    if ((pr & MENU_BTN_UP) && st->sel_app >= APP_COLS)
+        st->sel_app -= APP_COLS;
+    if ((pr & MENU_BTN_DOWN) &&
+        st->sel_app / APP_COLS < (st->napps - 1) / APP_COLS) {
+        st->sel_app += APP_COLS;
+        if (st->sel_app >= st->napps)
+            st->sel_app = st->napps - 1;
+    }
     if (pr & MENU_BTN_TRIANGLE) {
         if (st->host_dirty) {
             save_cfg(st);
@@ -345,7 +402,7 @@ static void settings_input(ui_state_t *st, unsigned pr) {
         st->sel_set = (st->sel_set + SET_COUNT - 1) % SET_COUNT;
     if (pr & MENU_BTN_DOWN)
         st->sel_set = (st->sel_set + 1) % SET_COUNT;
-    if (pr & (MENU_BTN_L1 | MENU_BTN_R1 | MENU_BTN_CIRCLE)) {
+    if (pr & MENU_BTN_CIRCLE) {
         st->tab = TAB_APPS;
         return;
     }
@@ -401,8 +458,7 @@ static void settings_input(ui_state_t *st, unsigned pr) {
 
 static void draw_osk(ui_state_t *st, ui_surface_t *s) {
     const int px = 480, py = 260, pw = 960, ph = 560;
-    ui_rect(s, px - 4, py - 4, pw + 8, ph + 8, COL_ACCENT);
-    ui_rect(s, px, py, pw, ph, COL_PANEL);
+    card(s, px, py, pw, ph, 1);
 
     const char *title = (st->osk_target == SET_HOST) ? "EDIT HOST" : "EDIT DEBUG HOST";
     ui_text(s, px + 32, py + 28, 3, COL_ACCENT, title);
@@ -411,7 +467,7 @@ static void draw_osk(ui_state_t *st, ui_surface_t *s) {
     char line[CONFIG_MAX_HOST + 2];
     snprintf(line, sizeof(line), "%s_", st->osk_buf);
     ui_rect(s, px + 32, py + 88, pw - 64, 44, COL_BG);
-    ui_text(s, px + 40, py + 98, 3, COL_TEXT, line);
+    ui_text_fit(s, px + 40, py + 95, 3, COL_TEXT, pw - 80, line);
 
     /* Grid */
     const int cell = 80, gx0 = px + 80, gy0 = py + 170;
@@ -420,11 +476,9 @@ static void draw_osk(ui_state_t *st, ui_surface_t *s) {
             int x = gx0 + cidx * cell;
             int y = gy0 + r * cell;
             int sel = (r == st->osk_row && cidx == st->osk_col);
-            ui_rect(s, x, y, cell - 8, cell - 8, sel ? COL_SEL : COL_BG);
-            if (sel)
-                ui_rect(s, x, y + cell - 12, cell - 8, 4, COL_ACCENT);
+            card(s, x, y, cell - 8, cell - 8, sel);
             char ch[2] = { k_osk_chars[r][cidx], 0 };
-            ui_text(s, x + (cell - 8) / 2 - 12, y + (cell - 8) / 2 - 12, 3,
+            ui_text(s, x + (cell - 8 - ui_text_w(3, ch)) / 2, y + (cell - 8) / 2 - 14, 3,
                     sel ? COL_TEXT : COL_DIM, ch);
         }
     }
@@ -439,7 +493,7 @@ static void draw_apps(ui_state_t *st, ui_surface_t *s) {
     if (st->apps_err == 2) {
         ui_text(s, 120, y0, 3, COL_WARN, "NO CONNECTION TO HOST");
         ui_text(s, 120, y0 + 50, 2, COL_DIM,
-                "Check Host in SETTINGS and press TRIANGLE to retry");
+                "Choose a PC in HOSTS or enter its IP in SETTINGS");
         return;
     }
     if (st->apps_err == 1) {
@@ -452,31 +506,34 @@ static void draw_apps(ui_state_t *st, ui_surface_t *s) {
         return;
     }
 
-    if (st->sel_app < st->app_first)
-        st->app_first = st->sel_app;
-    if (st->sel_app >= st->app_first + visible)
-        st->app_first = st->sel_app - visible + 1;
+    int row = st->sel_app / APP_COLS;
+    if (row < st->app_first)
+        st->app_first = row;
+    if (row >= st->app_first + APP_VISIBLE / APP_COLS)
+        st->app_first = row - APP_VISIBLE / APP_COLS + 1;
 
-    for (int i = 0; i < visible && st->app_first + i < st->napps; i++) {
-        int idx = st->app_first + i;
-        int y = y0 + i * row_h;
-        int sel = (idx == st->sel_app);
-        if (sel)
-            ui_rect(s, 100, y - 6, UI_W - 200, row_h - 4, COL_SEL);
-        int is_running = (st->server && st->server->currentGame != 0 &&
-                          st->apps[idx].id == st->server->currentGame);
-        int is_cur = !strcasecmp(st->apps[idx].name, st->cfg->app_name);
-        ui_text(s, 120, y, 3, sel ? COL_TEXT : COL_DIM, st->apps[idx].name);
-        if (is_running)
-            ui_text(s, UI_W - 280, y, 3, COL_WARN, "LIVE");
-        else if (is_cur)
-            ui_text(s, UI_W - 220, y, 3, COL_ACCENT, "*");
+    const int first = st->app_first * APP_COLS;
+    for (int i = 0; i < APP_VISIBLE && first + i < st->napps; i++) {
+        const ui_app_t *app = &st->apps[first + i];
+        int x = 100 + (i % APP_COLS) * 437;
+        int y = 298 + (i / APP_COLS) * 218;
+        int selected = first + i == st->sel_app;
+        card(s, x, y, 410, 194, selected);
+
+        ui_round_rect(s, x + 20, y + 20, 370, 96, 12, 0xFF252F48u);
+        /* Screen icon for entries without artwork. */
+        ui_round_rect(s, x + 176, y + 46, 58, 36, 5, COL_ACCENT);
+        ui_round_rect(s, x + 180, y + 50, 50, 28, 2, 0xFF252F48u);
+        ui_rect(s, x + 192, y + 87, 26, 3, COL_ACCENT);
+
+        ui_text_fit(s, x + 24, y + 132, 3, COL_TEXT, 362, app->name);
+        if (st->server && st->server->currentGame == app->id)
+            ui_text(s, x + 24, y + 163, 2, COL_WARN, "Streaming");
     }
-    if (st->napps > visible) {
-        char sc[32];
-        snprintf(sc, sizeof(sc), "%d/%d", st->sel_app + 1, st->napps);
-        ui_text(s, UI_W - 220, y0 - 50, 2, COL_DIM, sc);
-    }
+    ui_text(s, 100, 245, 4, COL_TEXT, "Your apps");
+    char position[32];
+    snprintf(position, sizeof(position), "%d / %d", st->sel_app + 1, st->napps);
+    ui_text(s, 1820 - ui_text_w(2, position), 256, 2, COL_DIM, position);
 }
 
 static void draw_settings(ui_state_t *st, ui_surface_t *s) {
@@ -484,8 +541,7 @@ static void draw_settings(ui_state_t *st, ui_surface_t *s) {
     for (int i = 0; i < SET_COUNT; i++) {
         int y = y0 + i * row_h;
         int sel = (i == st->sel_set);
-        if (sel)
-            ui_rect(s, 100, y - 8, UI_W - 200, row_h - 6, COL_SEL);
+        card(s, 100, y - 8, UI_W - 200, row_h - 6, sel);
         ui_text(s, 120, y, 3, sel ? COL_TEXT : COL_DIM, k_set_names[i]);
         char val[160];
         set_value_str(st, i, val, sizeof(val));
@@ -496,16 +552,41 @@ static void draw_settings(ui_state_t *st, ui_surface_t *s) {
                 "Host changed: TRIANGLE on APPS reconnects");
 }
 
-static void draw_all(ui_state_t *st, ui_surface_t *s) {
-    ui_clear(s, COL_BG);
+static void draw_hosts(const ui_state_t *st, ui_surface_t *s) {
+    const host_discovery_t *d = &st->discovery;
+    const char *status = "Choose a PC to connect";
+    if (d->fd >= 0)
+        status = "Searching for PCs on your local network...";
+    else if (!d->count)
+        status = "No PCs found. Start Sunshine and press TRIANGLE to search again.";
+    ui_text(s, 120, 262, 3, COL_DIM, status);
 
-    ui_text(s, 80, 48, 5, COL_TEXT, "MOONLIGHT PS4");
+    for (int i = 0; i < d->count; i++) {
+        const discovered_host_t *host = &d->hosts[i];
+        const int y = 316 + i * 54;
+        const int selected = i == st->sel_host;
+        card(s, 100, y, UI_W - 200, 48, selected);
+        ui_text_fit(s, 126, y + 10, 3, COL_TEXT, 1250, host->name);
+        ui_text(s, 1480, y + 12, 3, selected ? COL_ACCENT : COL_DIM,
+                host->address);
+    }
+}
+
+static void draw_all(ui_state_t *st, ui_surface_t *s) {
+    draw_background(s);
+
+    ui_round_rect(s, 100, 51, 48, 48, 14, COL_ACCENT);
+    ui_round_rect(s, 111, 59, 26, 26, 13, COL_BAR);
+    ui_round_rect(s, 121, 54, 22, 22, 11, COL_ACCENT);
+    ui_text(s, 166, 49, 5, COL_TEXT, "Moonlight");
 
     char status[256];
-    if (st->server) {
+    if (!st->cfg->host[0]) {
+        ui_text(s, 100, 112, 2, COL_DIM, "Choose a PC in HOSTS");
+    } else if (st->server) {
         snprintf(status, sizeof(status), "Host: %s  (%s)", st->cfg->host,
                  st->server->paired ? "paired" : "not paired");
-        ui_text(s, 80, 112, 2, COL_DIM, status);
+        ui_text(s, 100, 112, 2, COL_DIM, status);
         if (st->server->currentGame != 0) {
             const char *an = active_app_name(st);
             char live[256];
@@ -514,36 +595,42 @@ static void draw_all(ui_state_t *st, ui_surface_t *s) {
             else
                 snprintf(live, sizeof(live), "Stream active (id=%d)",
                          st->server->currentGame);
-            ui_text(s, 80, 136, 2, COL_WARN, live);
+            ui_text(s, 100, 136, 2, COL_WARN, live);
         }
     } else {
         snprintf(status, sizeof(status), "Host: %s  (NO CONNECTION)", st->cfg->host);
-        ui_text(s, 80, 112, 2, COL_WARN, status);
+        ui_text(s, 100, 112, 2, COL_WARN, status);
     }
 
-    /* Tabs */
-    ui_text(s, 120, 170, 3, st->tab == TAB_APPS ? COL_TEXT : COL_DIM, "APPS");
-    if (st->tab == TAB_APPS)
-        ui_rect(s, 120, 202, ui_text_w(3, "APPS"), 4, COL_ACCENT);
-    ui_text(s, 320, 170, 3, st->tab == TAB_SETTINGS ? COL_TEXT : COL_DIM, "SETTINGS");
-    if (st->tab == TAB_SETTINGS)
-        ui_rect(s, 320, 202, ui_text_w(3, "SETTINGS"), 4, COL_ACCENT);
+    static const char *tabs[TAB_COUNT] = { "Apps", "Hosts", "Settings" };
+    for (int i = 0; i < TAB_COUNT; i++) {
+        int x = 100 + 176 * i;
+        int active = (int)st->tab == i;
+        ui_round_rect(s, x, 168, 160, 48, 24, active ? COL_ACCENT : COL_PANEL);
+        ui_text(s, x + (160 - ui_text_w(3, tabs[i])) / 2, 177, 3,
+                active ? COL_BG : COL_DIM, tabs[i]);
+    }
 
     if (st->tab == TAB_APPS)
         draw_apps(st, s);
+    else if (st->tab == TAB_HOSTS)
+        draw_hosts(st, s);
     else
         draw_settings(st, s);
 
+    ui_rect(s, 0, 988, UI_W, UI_H - 988, COL_BAR);
     const char *hint;
     if (st->osk_active)
         hint = "";
     else if (st->tab == TAB_APPS) {
         if (st->server && st->server->currentGame != 0)
-            hint = "X/O start   OPTIONS close stream   L1/R1 settings   /\\ reload";
+            hint = "X/O start   OPTIONS close stream   L1/R1 tabs   /\\ reload";
         else
-            hint = "X/O start   L1/R1 settings   /\\ reload   up/down select";
-    } else
-        hint = "X edit/toggle   left/right value   O back   L1/R1 apps";
+            hint = "X/O start   L1/R1 tabs   /\\ reload   D-pad select";
+    } else if (st->tab == TAB_HOSTS)
+        hint = "X connect   TRIANGLE rescan   SQUARE enter IP   L1/R1 tabs";
+    else
+        hint = "X edit/toggle   left/right value   O apps   L1/R1 tabs";
     ui_text(s, 80, UI_H - 60, 2, COL_DIM, hint);
 
     if (st->osk_active)
@@ -557,11 +644,9 @@ int ui_menu_run(app_config_t *cfg, gs_server_t *server, const char *config_dir) 
     st.server = server;
     st.config_dir = config_dir;
     st.result = -1000;
-    /* No host / no server: open Settings to configure. */
-    if (!cfg->host[0] || !server) {
-        st.tab = TAB_SETTINGS;
-        st.sel_set = SET_HOST;
-    }
+    st.discovery.fd = -1;
+    if (!server)
+        st.tab = TAB_HOSTS;
 
     if (video_ui_begin(UI_W, UI_H) != 0) {
         LOGE("ui: video_ui_begin failed");
@@ -603,6 +688,7 @@ int ui_menu_run(app_config_t *cfg, gs_server_t *server, const char *config_dir) 
         2000);
     input_menu_absorb();
 
+    discovery_start(&st.discovery);
     int dirty = 1;
     int no_pad = 0;
     int idle_frames = 0;
@@ -632,9 +718,18 @@ int ui_menu_run(app_config_t *cfg, gs_server_t *server, const char *config_dir) 
                 input_menu_absorb();
         }
 
+        if (discovery_poll(&st.discovery))
+            dirty = 1;
+
         if (pr) {
             if (st.osk_active)
                 osk_input(&st, pr);
+            else if (pr & MENU_BTN_L1)
+                st.tab = (st.tab + TAB_COUNT - 1) % TAB_COUNT;
+            else if (pr & MENU_BTN_R1)
+                st.tab = (st.tab + 1) % TAB_COUNT;
+            else if (st.tab == TAB_HOSTS)
+                hosts_input(&st, pr);
             else if (st.tab == TAB_APPS)
                 apps_input(&st, pr);
             else
@@ -664,6 +759,7 @@ int ui_menu_run(app_config_t *cfg, gs_server_t *server, const char *config_dir) 
         usleep(8000);
     }
 
+    discovery_stop(&st.discovery);
     LOGI("ui: freeing staging...");
     free(staging);
     LOGI("ui: closing present...");

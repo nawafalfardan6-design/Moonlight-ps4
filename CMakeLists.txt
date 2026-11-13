@@ -81,6 +81,7 @@ if(PS4)
         src/input/input_pad.c
         src/ui/ui_draw.c
         src/ui/ui_menu.c
+        src/ui/host_discovery.c
         ${COMMON_SOURCES}
         ${GAMESTREAM_SOURCES}
     )

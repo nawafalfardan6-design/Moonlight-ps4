@@ -315,10 +315,6 @@ int stream_run(app_config_t *cfg, const char *config_dir) {
     int connected = 0;
     if (cfg->host[0]) {
         connected = (stream_connect(cfg, config_dir) == 0);
-    } else {
-        LOGI("stream_run: empty host → settings menu");
-        ui_show_status("MOONLIGHT PS4", "Set the Host",
-                       "SETTINGS → Host → on-screen keyboard");
     }
 
     /* Menu <-> stream loop until the user closes with the PS button. */
